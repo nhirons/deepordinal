@@ -587,7 +587,6 @@ wheels = [
 
 [[package]]
 name = "deepordinal"
-version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -618,10 +617,10 @@ requires-dist = [
     { name = "flax", marker = "python_full_version >= '3.11' and extra == 'jax'", specifier = ">=0.11" },
     { name = "jax", marker = "python_full_version >= '3.11' and extra == 'jax'", specifier = ">=0.6" },
     { name = "numpy" },
-    { name = "tensorflow", marker = "extra == 'tf'", specifier = ">=2.0" },
+    { name = "tensorflow", marker = "extra == 'tf'", specifier = ">=2.15" },
     { name = "torch", marker = "extra == 'torch'", specifier = ">=2.0" },
 ]
-provides-extras = ["tf", "torch", "jax"]
+provides-extras = ["torch", "tf", "jax"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest", specifier = ">=8.0.0" }]

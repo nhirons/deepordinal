@@ -1,3 +1,5 @@
+"""JAX backend. The losses use only jax.numpy; the layer is a Flax NNX module."""
+
 import math
 
 import jax
@@ -10,192 +12,142 @@ __all__ = ["OrdinalOutput", "cumulative_link_loss", "ordinal_loss", "ordistic_lo
 
 
 def _penalty(z, name):
-    if name == "hinge":
-        return jnp.maximum(0.0, 1.0 - z)
-    elif name == "smooth_hinge":
-        return jnp.where(
-            z >= 1,
-            jnp.zeros_like(z),
-            jnp.where(z > 0, (1 - z) ** 2 / 2, 0.5 - z),
-        )
-    elif name == "modified_least_squares":
-        return jnp.where(z >= 1, jnp.zeros_like(z), (1 - z) ** 2)
-    elif name == "logistic":
+    if name == "logistic":
         return jax.nn.softplus(-z)
-    else:
-        raise ValueError(f"Unknown penalty: {name}")
+    if name == "hinge":
+        return jax.nn.relu(1 - z)
+    if name == "smooth_hinge":
+        return jnp.where(z >= 1, 0.0, jnp.where(z > 0, (1 - z) ** 2 / 2, 0.5 - z))
+    if name == "modified_least_squares":
+        return jnp.where(z >= 1, 0.0, (1 - z) ** 2)
+    raise ValueError(f"Unknown penalty: {name}")
+
+
+def _nll(log_p, targets):
+    y = jnp.asarray(targets).astype(jnp.int32).reshape(-1, 1)
+    return -jnp.take_along_axis(log_p, y, axis=1).mean()
 
 
 def ordinal_loss(logits, targets, thresholds, construction="all", penalty="logistic"):
-    """Rennie & Srebro ordinal loss (IJCAI 2005).
+    """Threshold ordinal loss (Rennie & Srebro 2005, eqs 12 and 13).
 
     Args:
-        logits: (batch,) or (batch, 1): raw predictor output z(x).
+        logits: (batch,) or (batch, 1): raw predictor output z, from ``layer.logit``.
         targets: (batch,): integer labels in [0, K).
-        thresholds: (K-1,): sorted interior thresholds.
-        construction: ``'all'`` or ``'immediate'``.
-        penalty: ``'hinge'``, ``'smooth_hinge'``, ``'modified_least_squares'``,
-            or ``'logistic'``.
+        thresholds: (K-1,): ordered thresholds, from ``layer.interior_thresholds``.
+        construction: ``"all"`` penalizes every threshold (eq 13).
+            ``"immediate"`` penalizes only the two bounding the target class (eq 12).
+        penalty: ``"logistic"``, ``"hinge"``, ``"smooth_hinge"``, or
+            ``"modified_least_squares"`` (eqs 5 to 9).
 
     Returns:
         Scalar mean loss over the batch.
     """
     if construction not in ("all", "immediate"):
         raise ValueError(f"Unknown construction: {construction}")
-    logits = jnp.reshape(jnp.asarray(logits), (-1,))
-    targets = jnp.asarray(targets).astype(jnp.int32)[:, None]  # (batch, 1)
-    thresholds = jnp.asarray(thresholds, dtype=logits.dtype)
-    K = thresholds.shape[0] + 1
-    # Threshold l (0-indexed) separates classes <= l from classes > l. The logit
-    # should sit above threshold l when l < y and below it otherwise, so the
-    # margin is s(l; y) * (theta_l - z) with s = -1 if l < y else +1 (eq 13).
-    l_idx = jnp.arange(K - 1)  # (K-1,)
-    signs = 1 - 2 * (l_idx < targets).astype(logits.dtype)  # (batch, K-1)
-    margins = signs * (thresholds[None, :] - logits[:, None])  # (batch, K-1)
-    penalties = _penalty(margins, penalty)
+    z = jnp.asarray(logits).reshape(-1, 1)
+    y = jnp.asarray(targets).astype(jnp.int32).reshape(-1, 1)
+    thresholds = jnp.asarray(thresholds)
+    # Threshold l separates classes <= l from classes > l, so the margin is
+    # positive when z is on the correct side of it.
+    l = jnp.arange(thresholds.shape[0])
+    penalties = _penalty(jnp.where(l < y, z - thresholds, thresholds - z), penalty)
     if construction == "immediate":
-        # eq 12 keeps only the thresholds bounding the target class: y-1 and y.
-        # The first and last classes have one bounding threshold each.
-        penalties = penalties * ((l_idx == targets - 1) | (l_idx == targets))
-    loss = penalties.sum(axis=1)  # (batch,)
-
-    return loss.mean()
+        penalties = penalties * ((l == y - 1) | (l == y))
+    return penalties.sum(axis=1).mean()
 
 
 def ordistic_loss(logits, targets, means, log_priors=None):
-    """Ordistic loss (Rennie & Srebro, Section 4).
+    """Ordistic loss (Rennie & Srebro 2005, section 4).
+
+    Negative log-likelihood of ``P(y = k | z)`` proportional to
+    ``exp(means[k] * z + log_priors[k] - means[k] ** 2 / 2)``.
 
     Args:
-        logits: (batch,) or (batch, 1): raw predictor output z(x).
+        logits: (batch,) or (batch, 1): raw predictor output z.
         targets: (batch,): integer labels in [0, K).
-        means: (K,): class means (mu_1=-1, mu_K=1 by convention; interior learned).
-        log_priors: (K,) or None: log-prior terms pi_i. Defaults to zeros.
+        means: (K,): class means. The paper fixes the first at -1 and the last at 1.
+        log_priors: (K,) or None: log-prior terms. Defaults to zeros.
 
     Returns:
         Scalar mean negative log-likelihood over the batch.
     """
-    logits = jnp.reshape(jnp.asarray(logits), (-1,))
-    targets = jnp.asarray(targets).astype(jnp.int32)
-    means = jnp.asarray(means, dtype=logits.dtype)
-    K = means.shape[0]
-    if log_priors is None:
-        log_priors = jnp.zeros((K,), dtype=logits.dtype)
-    else:
-        log_priors = jnp.asarray(log_priors, dtype=logits.dtype)
-    # energy_ik = mu_k * z_i + pi_k - mu_k^2 / 2
-    energy = means[None, :] * logits[:, None] + log_priors[None, :] - means[None, :] ** 2 / 2
-    # loss = -log P(y|z) = -energy[y] + log(sum_k exp(energy[k]))
-    target_energy = jnp.take_along_axis(energy, targets[:, None], axis=1)[:, 0]
-    log_partition = jax.nn.logsumexp(energy, axis=1)
-    return (log_partition - target_energy).mean()
-
-
-_LOG2 = math.log(2.0)
-
-
-def _log1mexp(a):
-    # log(1 - exp(-a)) for a > 0 (Maechler 2012)
-    return jnp.where(a < _LOG2, jnp.log(-jnp.expm1(-a)), jnp.log1p(-jnp.exp(-a)))
-
-
-def _log_probs(logit, thresholds):
-    """log P(y = k | z) for the cumulative logit model, shape ``(..., K)``.
-
-    ``logit`` has shape ``(..., 1)``. With ``a(k) = t(k) - z``::
-
-        log P(0)     = log sigmoid(a(1))
-        log P(K-1)   = log sigmoid(-a(K-1))
-        log P(k)     = log sigmoid(a(k+1)) + log sigmoid(-a(k)) + log(1 - exp(a(k) - a(k+1)))
-
-    The middle identity is exact, and every term is a softplus or a
-    ``log1mexp``, so nothing cancels.
-    """
-    a = thresholds - logit  # (..., K-1)
-    first = -jax.nn.softplus(-a[..., :1])
-    last = -jax.nn.softplus(a[..., -1:])
-    hi, lo = a[..., 1:], a[..., :-1]
-    mid = -jax.nn.softplus(-hi) - jax.nn.softplus(lo) + _log1mexp(hi - lo)
-    return jnp.concatenate([first, mid, last], axis=-1)
+    means = jnp.asarray(means)
+    energy = means * jnp.asarray(logits).reshape(-1, 1) - means**2 / 2
+    if log_priors is not None:
+        energy = energy + jnp.asarray(log_priors)
+    return _nll(jax.nn.log_softmax(energy, axis=1), targets)
 
 
 def cumulative_link_loss(logits, targets, thresholds):
-    """Negative log-likelihood of the cumulative logit model.
-
-    This is the likelihood of the model ``OrdinalOutput`` represents, also
-    called the proportional-odds or ordered logit model::
-
-        P(y = k | z) = sigmoid(t(k+1) - z) - sigmoid(t(k) - z)
-
-    The log-probabilities are computed without subtracting probabilities,
-    so they stay accurate when every ``sigmoid(t(k) - z)`` rounds to 0 or 1.
+    """Negative log-likelihood of the cumulative logit model ``OrdinalOutput`` represents.
 
     Args:
-        logits: (batch,) or (batch, 1): raw predictor output z(x).
+        logits: (batch,) or (batch, 1): raw predictor output z, from ``layer.logit``.
         targets: (batch,): integer labels in [0, K).
-        thresholds: (K-1,): strictly increasing interior thresholds.
+        thresholds: (K-1,): increasing thresholds, from ``layer.interior_thresholds``.
 
     Returns:
         Scalar mean negative log-likelihood over the batch.
     """
-    logits = jnp.reshape(jnp.asarray(logits), (-1, 1))
-    targets = jnp.asarray(targets).astype(jnp.int32).reshape(-1, 1)
-    thresholds = jnp.asarray(thresholds, dtype=logits.dtype)
-    log_p = _log_probs(logits, thresholds)  # (batch, K)
-    return -jnp.take_along_axis(log_p, targets, axis=1).mean()
+    return _nll(_log_probs(jnp.asarray(logits).reshape(-1, 1), jnp.asarray(thresholds)), targets)
+
+
+def _log1mexp(x):
+    """log(1 - exp(-x)) for x > 0 (Maechler 2012)."""
+    return jnp.where(x < math.log(2), jnp.log(-jnp.expm1(-x)), jnp.log1p(-jnp.exp(-x)))
+
+
+def _log_probs(logit, thresholds):
+    """``log P(y = k | z)``, shape ``(..., K)``, for logit shape ``(..., 1)``.
+
+    With ``a = thresholds - z``, the exact identity
+    ``sigmoid(a[k]) - sigmoid(a[k-1]) = sigmoid(a[k]) * sigmoid(-a[k-1]) * (1 - exp(a[k-1] - a[k]))``
+    turns every term into a softplus or a ``log1mexp``, so nothing cancels.
+    A plain difference of sigmoids rounds to 0 in float32 once ``|z|`` passes about 17.
+    """
+    a = thresholds - logit
+    first = -jax.nn.softplus(-a[..., :1])
+    last = -jax.nn.softplus(a[..., -1:])
+    hi, lo = a[..., 1:], a[..., :-1]
+    middle = -jax.nn.softplus(-hi) - jax.nn.softplus(lo) + _log1mexp(hi - lo)
+    return jnp.concatenate([first, middle, last], axis=-1)
 
 
 class OrdinalOutput(nnx.Module):
-    """Ordinal regression output layer (Flax NNX).
+    """Ordinal output layer: features, then one logit z, then K class probabilities.
 
-    Projects an arbitrary input down to a single logit and converts it
-    into *output_dim* class probabilities via learned, ordered thresholds
-    ``t(1) <= ... <= t(K-1)``::
+    ``P(y = k | x) = sigmoid(t[k] - z) - sigmoid(t[k-1] - z)``, where the first
+    term is 1 for the last class and the second is 0 for the first class.
 
-        P(y = k | x) = sigmoid(t(k+1) - logit) - sigmoid(t(k) - logit)
-
-    where ``sigmoid(t(0) - logit)`` is 0 and ``sigmoid(t(K) - logit)`` is 1.
-
-    The thresholds are ordered by construction. The layer stores
-    ``raw_thresholds``: the first threshold, then the inverse softplus of each
-    gap. ``interior_thresholds`` recovers them as
-    ``cumsum([raw[0], softplus(raw[1:])])``, so no optimizer step can reorder
-    them and the probabilities are never negative. Gaps are positive in exact
-    arithmetic; a raw gap below about -100 underflows to 0 in float32, which
-    ties two thresholds and gives the class between them probability 0.
-
-    The projection has no bias. Adding a constant to the logit and to every
-    threshold gives the same model, so the thresholds absorb the bias.
-
-    Thresholds initialize at ``logit(k/K)``, so a zero logit gives every class
-    probability ``1/K``.
+    The K-1 thresholds ``t = interior_thresholds`` are ordered by construction.
+    The trainable ``raw_thresholds`` hold the first threshold and the inverse
+    softplus of each gap. They start at ``logit(k/K)``, so a zero logit gives
+    every class probability 1/K. The projection has no bias, because shifting
+    z and every threshold together leaves the model unchanged.
 
     Args:
-        input_dim: Size of the input feature dimension.
-        output_dim: Number of ordinal classes, at least 2.
-        rngs: ``nnx.Rngs`` used to initialize the projection.
+        input_dim: input feature size.
+        output_dim: number of classes K, at least 2.
+        rngs: ``nnx.Rngs`` for the projection weights.
     """
 
     def __init__(self, input_dim, output_dim, *, rngs: nnx.Rngs):
         check_output_dim(output_dim)
-        self.input_dim = input_dim
         self.output_dim = output_dim
         self.linear = nnx.Linear(input_dim, 1, use_bias=False, rngs=rngs)
         self.raw_thresholds = nnx.Param(jnp.asarray(initial_raw_thresholds(output_dim)))
 
     @property
     def interior_thresholds(self):
-        """Ordered thresholds, shape ``(K-1,)``. Differentiable."""
         raw = self.raw_thresholds[...]
         return jnp.cumsum(jnp.concatenate([raw[:1], jax.nn.softplus(raw[1:])]))
 
     def logit(self, x):
-        """Raw logit ``z(x)``, shape ``(..., 1)``. Pass this to the loss functions."""
         return self.linear(x)
 
     def log_probs(self, x):
-        """Log class probabilities, shape ``(..., K)``. Numerically stable."""
-        logit = self.logit(x)  # (..., 1)
-        return _log_probs(logit, self.interior_thresholds.astype(logit.dtype))
+        return _log_probs(self.logit(x), self.interior_thresholds)
 
     def __call__(self, x):
         return jnp.exp(self.log_probs(x))

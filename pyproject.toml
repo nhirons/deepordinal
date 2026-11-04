@@ -1,43 +1,40 @@
 [project]
 name = "deepordinal"
-version = "0.3.0"
+dynamic = ["version"]
 description = "Ordinal output layers and loss functions (Rennie & Srebro, 2005) for PyTorch, TF/Keras, and JAX/Flax"
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "Nicholas Hirons" }]
 requires-python = ">=3.10"
 dependencies = ["numpy"]
-license = "MIT"
-authors = [
-    { name = "Nicholas Hirons" },
-]
-readme = "README.md"
+keywords = ["ordinal-regression", "deep-learning", "pytorch", "tensorflow", "keras", "jax", "flax"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
     "Programming Language :: Python :: 3",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
-keywords = ["ordinal-regression", "deep-learning", "pytorch", "tensorflow", "keras", "jax", "flax"]
 
 [project.optional-dependencies]
-tf = ["tensorflow>=2.0"]
 torch = ["torch>=2.0"]
+tf = ["tensorflow>=2.15"]
 jax = ["jax>=0.6; python_version >= '3.11'", "flax>=0.11; python_version >= '3.11'"]
 
+[project.urls]
+Repository = "https://github.com/nhirons/deepordinal"
+
 [dependency-groups]
-dev = [
-    "pytest>=8.0.0",
-]
+dev = ["pytest>=8.0.0"]
 
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.dynamic]
+version = { attr = "deepordinal.__version__" }
 
 [tool.setuptools.packages.find]
 include = ["deepordinal*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-python_files = ["test_*.py"]
-python_functions = ["test_*"]
-
-[project.urls]
-Repository = "https://github.com/nhirons/deepordinal"
