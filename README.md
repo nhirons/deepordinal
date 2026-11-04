@@ -4,7 +4,7 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-Ordinal output layers and loss functions for PyTorch and TensorFlow/Keras, based on [Rennie & Srebro (2005)](https://ttic.uchicago.edu/~nati/Publications/RennieSrebroIJCAI05.pdf).
+Ordinal output layers and loss functions for PyTorch, TensorFlow/Keras, and JAX/Flax, based on [Rennie & Srebro (2005)](https://ttic.uchicago.edu/~nati/Publications/RennieSrebroIJCAI05.pdf).
 
 DeepOrdinal provides an `OrdinalOutput` layer that converts a learned logit into ordinal class probabilities via sorted thresholds, plus loss functions designed specifically for ordinal regression.
 
@@ -19,12 +19,13 @@ Install with a specific backend:
 ```bash
 pip install "deepordinal[torch]"  # PyTorch
 pip install "deepordinal[tf]"     # TensorFlow/Keras
+pip install "deepordinal[jax]"    # JAX/Flax NNX (Python 3.11+)
 ```
 
 For development:
 
 ```bash
-pip install -e ".[torch,tf]"
+pip install -e ".[torch,tf,jax]"
 ```
 
 ## Quick Start
@@ -81,6 +82,45 @@ probs = ordinal(dense(x_batch))  # (batch, K) class probabilities
 preds = tf.argmax(probs, axis=1)
 ```
 
+### JAX/Flax NNX
+
+```python
+import jax
+import optax
+from flax import nnx
+from deepordinal.jax import OrdinalOutput, ordinal_loss
+
+class Model(nnx.Module):
+    def __init__(self, rngs):
+        self.hidden = nnx.Linear(8, 16, rngs=rngs)
+        self.ordinal = OrdinalOutput(input_dim=16, output_dim=4, rngs=rngs)
+
+    def features(self, x):
+        return jax.nn.relu(self.hidden(x))
+
+    def __call__(self, x):
+        return self.ordinal(self.features(x))
+
+model = Model(nnx.Rngs(0))
+optimizer = nnx.Optimizer(model, optax.adam(1e-3), wrt=nnx.Param)
+
+@nnx.jit
+def train_step(model, optimizer, x, y):
+    def loss_fn(model):
+        logits = model.ordinal.linear(model.features(x))  # raw logit
+        thresholds = model.ordinal.interior_thresholds[...]
+        return ordinal_loss(logits, y, thresholds)
+    loss, grads = nnx.value_and_grad(loss_fn)(model)
+    optimizer.update(model, grads)
+    return loss
+
+loss = train_step(model, optimizer, x_batch, y_batch)
+
+# Inference
+probs = model(x_batch)  # (batch, K) class probabilities
+preds = probs.argmax(axis=1)
+```
+
 ## API
 
 ### `OrdinalOutput` Layer
@@ -93,12 +133,12 @@ P(y = k | x) = sigmoid(t(k+1) - logit) - sigmoid(t(k) - logit)
 
 where `t(0) = -inf` and `t(K) = inf` are fixed, and interior thresholds are initialized sorted.
 
-| | PyTorch | TensorFlow/Keras |
-|---|---|---|
-| Import | `from deepordinal.torch import OrdinalOutput` | `from deepordinal.tf import OrdinalOutput` |
-| Constructor | `OrdinalOutput(input_dim, output_dim)` | `OrdinalOutput(output_dim)` |
-| Logit access | `layer.linear(h)` | `tf.matmul(h, layer.kernel) + layer.bias` |
-| Thresholds | `layer.interior_thresholds` — shape `(K-1,)` | `layer.interior_thresholds[0]` — shape `(1, K-1)` |
+| | PyTorch | TensorFlow/Keras | JAX/Flax NNX |
+|---|---|---|---|
+| Import | `from deepordinal.torch import OrdinalOutput` | `from deepordinal.tf import OrdinalOutput` | `from deepordinal.jax import OrdinalOutput` |
+| Constructor | `OrdinalOutput(input_dim, output_dim)` | `OrdinalOutput(output_dim)` | `OrdinalOutput(input_dim, output_dim, rngs=rngs)` |
+| Logit access | `layer.linear(h)` | `tf.matmul(h, layer.kernel) + layer.bias` | `layer.linear(h)` |
+| Thresholds | `layer.interior_thresholds`, shape `(K-1,)` | `layer.interior_thresholds[0]` (variable shape is `(1, K-1)`) | `layer.interior_thresholds[...]`, shape `(K-1,)` |
 
 ### `ordinal_loss`
 
@@ -161,7 +201,7 @@ Complete training loops with synthetic ordinal data:
 ## Testing
 
 ```bash
-pip install -e ".[torch,tf]"
+pip install -e ".[torch,tf,jax]"
 pytest -v
 ```
 

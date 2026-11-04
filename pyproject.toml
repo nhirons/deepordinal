@@ -1,7 +1,7 @@
 [project]
 name = "deepordinal"
 version = "0.2.1.post1"
-description = "Ordinal output layers and loss functions (Rennie & Srebro, 2005) for PyTorch and TF/Keras"
+description = "Ordinal output layers and loss functions (Rennie & Srebro, 2005) for PyTorch, TF/Keras, and JAX/Flax"
 requires-python = ">=3.10"
 dependencies = ["numpy"]
 license = "MIT"
@@ -15,11 +15,12 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
-keywords = ["ordinal-regression", "deep-learning", "pytorch", "tensorflow", "keras"]
+keywords = ["ordinal-regression", "deep-learning", "pytorch", "tensorflow", "keras", "jax", "flax"]
 
 [project.optional-dependencies]
 tf = ["tensorflow>=2.0"]
 torch = ["torch>=2.0"]
+jax = ["jax>=0.6; python_version >= '3.11'", "flax>=0.11; python_version >= '3.11'"]
 
 [dependency-groups]
 dev = [
