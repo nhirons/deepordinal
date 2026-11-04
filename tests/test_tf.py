@@ -2,7 +2,7 @@ import pytest
 
 tf = pytest.importorskip("tensorflow")
 
-from deepordinal.tf import OrdinalOutput, SortedInitializer, _log_probs, cumulative_link_loss, ordinal_loss, ordistic_loss
+from deepordinal.tf import OrdinalOutput, _log_probs, cumulative_link_loss, ordinal_loss, ordistic_loss
 
 import _reference as ref
 
@@ -52,13 +52,6 @@ def test_gradients_flow():
         loss = tf.reduce_sum(out)
     grads = tape.gradient(loss, layer.trainable_variables)
     assert all(g is not None for g in grads)
-
-
-def test_sorted_initializer():
-    init = SortedInitializer("glorot_uniform")
-    values = init((1, 10))
-    v = values.numpy().flatten()
-    assert list(v) == sorted(v)
 
 
 def test_get_config_roundtrip():

@@ -1,12 +1,11 @@
 import math
 
 import tensorflow as tf
-from tensorflow.keras import initializers
 from tensorflow.keras.layers import Layer
 
 from deepordinal._common import check_output_dim, initial_raw_thresholds
 
-__all__ = ["OrdinalOutput", "SortedInitializer", "cumulative_link_loss", "ordinal_loss", "ordistic_loss"]
+__all__ = ["OrdinalOutput", "cumulative_link_loss", "ordinal_loss", "ordistic_loss"]
 
 def _penalty(z, name):
     if name == "hinge":
@@ -146,20 +145,6 @@ def cumulative_link_loss(logits, targets, thresholds):
     thresholds = tf.cast(thresholds, tf.float32)
     log_p = _log_probs(logits, thresholds)  # (batch, K)
     return -tf.reduce_mean(tf.gather(log_p, targets, axis=1, batch_dims=1))
-
-
-class SortedInitializer(initializers.Initializer):
-    """Wraps a Keras initializer and returns its output sorted along the last axis."""
-
-    def __init__(self, base="glorot_uniform"):
-        self.base = initializers.get(base)
-
-    def __call__(self, shape, dtype=None):
-        values = self.base(shape, dtype=dtype)
-        return tf.sort(values, axis=-1)
-
-    def get_config(self):
-        return {"base": initializers.serialize(self.base)}
 
 
 class OrdinalOutput(Layer):
