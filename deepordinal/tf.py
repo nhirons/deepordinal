@@ -111,7 +111,7 @@ class OrdinalOutput(Layer):
 
     Projects an arbitrary input down to a single logit and converts it
     into *output_dim* class probabilities via learned, ordered thresholds
-    ``t(1) < ... < t(K-1)``::
+    ``t(1) <= ... <= t(K-1)``::
 
         P(y = k | x) = sigmoid(t(k+1) - logit) - sigmoid(t(k) - logit)
 
@@ -121,7 +121,9 @@ class OrdinalOutput(Layer):
     ``raw_thresholds``: the first threshold, then the inverse softplus of each
     gap. ``interior_thresholds`` recovers them as
     ``cumsum([raw[0], softplus(raw[1:])])``, so no optimizer step can reorder
-    them and the probabilities are never negative.
+    them and the probabilities are never negative. Gaps are positive in exact
+    arithmetic; a raw gap below about -100 underflows to 0 in float32, which
+    ties two thresholds and gives the class between them probability 0.
 
     The projection has no bias. Adding a constant to the logit and to every
     threshold gives the same model, so the thresholds absorb the bias.
@@ -161,8 +163,15 @@ class OrdinalOutput(Layer):
         return tf.cumsum(tf.concat([raw[:1], tf.math.softplus(raw[1:])], axis=0))
 
     def logit(self, inputs):
-        """Raw logit ``z(x)``, shape ``(..., 1)``. Pass this to the loss functions."""
-        return tf.matmul(inputs, self.kernel)
+        """Raw logit ``z(x)``, shape ``(..., 1)``. Pass this to the loss functions.
+
+        Unlike ``layer(inputs)``, this method bypasses ``Layer.__call__``, so it
+        builds the layer and casts inputs to the compute dtype itself.
+        """
+        inputs = tf.convert_to_tensor(inputs)
+        if not self.built:
+            self.build(inputs.shape)
+        return tf.matmul(tf.cast(inputs, self.compute_dtype), self.kernel)
 
     def call(self, inputs):
         logit = self.logit(inputs)  # (..., 1)

@@ -98,6 +98,21 @@ def test_thresholds_gradient():
     assert all(g is not None and np.isfinite(g.numpy()).all() for g in grads)
 
 
+def test_logit_builds_unbuilt_layer():
+    layer = OrdinalOutput(output_dim=3)
+    assert layer.logit(tf.zeros((2, 4))).shape == (2, 1)
+    assert layer.built
+
+
+def test_logit_casts_inputs_like_call():
+    layer = OrdinalOutput(output_dim=4)
+    h = tf.random.normal((2, 3), dtype=tf.float64)
+    assert layer(h).dtype == tf.float32
+    logit = layer.logit(h)
+    assert logit.dtype == tf.float32
+    np.testing.assert_allclose(logit.numpy(), tf.matmul(tf.cast(h, tf.float32), layer.kernel).numpy())
+
+
 def test_output_dim_too_small_raises():
     with pytest.raises(ValueError, match="at least 2"):
         OrdinalOutput(output_dim=1)
