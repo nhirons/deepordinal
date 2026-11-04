@@ -2,6 +2,8 @@ import tensorflow as tf
 from tensorflow.keras import initializers
 from tensorflow.keras.layers import Layer
 
+from deepordinal._common import check_output_dim, initial_raw_thresholds
+
 __all__ = ["OrdinalOutput", "SortedInitializer", "ordinal_loss", "ordistic_loss"]
 
 def _penalty(z, name):
@@ -105,19 +107,35 @@ class SortedInitializer(initializers.Initializer):
 
 
 class OrdinalOutput(Layer):
-    """Ordinal regression output layer.
+    """Ordinal regression output layer (Keras).
 
     Projects an arbitrary input down to a single logit and converts it
-    into *output_dim* class probabilities via learned, sorted thresholds.
+    into *output_dim* class probabilities via learned, ordered thresholds
+    ``t(1) < ... < t(K-1)``::
 
-    The layer learns ``output_dim - 1`` interior thresholds ``t(1)…t(K-1)``
-    (with ``t(0) = -∞`` and ``t(K) = +∞`` fixed) and computes::
+        P(y = k | x) = sigmoid(t(k+1) - logit) - sigmoid(t(k) - logit)
 
-        P(y = k | x) = σ(t(k+1) - logit) - σ(t(k) - logit)
+    where ``sigmoid(t(0) - logit)`` is 0 and ``sigmoid(t(K) - logit)`` is 1.
+
+    The thresholds are ordered by construction. The layer stores
+    ``raw_thresholds``: the first threshold, then the inverse softplus of each
+    gap. ``interior_thresholds`` recovers them as
+    ``cumsum([raw[0], softplus(raw[1:])])``, so no optimizer step can reorder
+    them and the probabilities are never negative.
+
+    The projection has no bias. Adding a constant to the logit and to every
+    threshold gives the same model, so the thresholds absorb the bias.
+
+    Thresholds initialize at ``logit(k/K)``, so a zero logit gives every class
+    probability ``1/K``.
+
+    Args:
+        output_dim: Number of ordinal classes, at least 2.
     """
 
     def __init__(self, output_dim, **kwargs):
         super().__init__(**kwargs)
+        check_output_dim(output_dim)
         self.output_dim = output_dim
 
     def build(self, input_shape):
@@ -127,28 +145,33 @@ class OrdinalOutput(Layer):
             initializer="glorot_uniform",
             trainable=True,
         )
-        self.bias = self.add_weight(
-            name="bias",
-            shape=(1,),
-            initializer="zeros",
-            trainable=True,
-        )
-        self.interior_thresholds = self.add_weight(
-            name="thresholds",
-            shape=(1, self.output_dim - 1),
-            initializer=SortedInitializer("glorot_uniform"),
+        raw = initial_raw_thresholds(self.output_dim)
+        self.raw_thresholds = self.add_weight(
+            name="raw_thresholds",
+            shape=(self.output_dim - 1,),
+            initializer=lambda shape, dtype=None: tf.constant(raw, dtype=dtype),
             trainable=True,
         )
         super().build(input_shape)
 
+    @property
+    def interior_thresholds(self):
+        """Ordered thresholds, shape ``(K-1,)``. Differentiable."""
+        raw = self.raw_thresholds
+        return tf.cumsum(tf.concat([raw[:1], tf.math.softplus(raw[1:])], axis=0))
+
+    def logit(self, inputs):
+        """Raw logit ``z(x)``, shape ``(..., 1)``. Pass this to the loss functions."""
+        return tf.matmul(inputs, self.kernel)
+
     def call(self, inputs):
-        logit = tf.matmul(inputs, self.kernel) + self.bias  # (batch, 1)
-        cdf = tf.sigmoid(self.interior_thresholds - logit)  # P(y <= k), (batch, K-1)
+        logit = self.logit(inputs)  # (..., 1)
+        cdf = tf.sigmoid(self.interior_thresholds - logit)  # P(y <= k), (..., K-1)
         ones = tf.ones_like(logit)
         return tf.concat([cdf, ones], axis=-1) - tf.concat([1.0 - ones, cdf], axis=-1)
 
     def compute_output_shape(self, input_shape):
-        return (input_shape[0], self.output_dim)
+        return (*input_shape[:-1], self.output_dim)
 
     def get_config(self):
         config = super().get_config()

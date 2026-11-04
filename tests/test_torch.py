@@ -40,7 +40,7 @@ def test_gradients_flow():
     loss = out.sum()
     loss.backward()
     assert layer.linear.weight.grad is not None
-    assert layer.interior_thresholds.grad is not None
+    assert layer.raw_thresholds.grad is not None
 
 
 def test_seed_reproducibility():
@@ -50,6 +50,40 @@ def test_seed_reproducibility():
     b = OrdinalOutput(input_dim=4, output_dim=3)
     x = torch.randn(4, 4)
     torch.testing.assert_close(a(x), b(x))
+
+
+def test_thresholds_stay_ordered_for_any_raw_values():
+    layer = OrdinalOutput(input_dim=4, output_dim=8)
+    with torch.no_grad():
+        layer.raw_thresholds.copy_(torch.randn(7) * 10)
+    t = layer.interior_thresholds
+    assert (t[1:] >= t[:-1]).all()
+    assert (layer(torch.randn(64, 4) * 10) >= 0).all()
+
+
+def test_initial_thresholds_give_uniform_probabilities_at_zero_logit():
+    layer = OrdinalOutput(input_dim=4, output_dim=5)
+    out = layer(torch.zeros(3, 4))
+    torch.testing.assert_close(out, torch.full((3, 5), 0.2))
+
+
+def test_no_bias():
+    layer = OrdinalOutput(input_dim=4, output_dim=3)
+    assert layer.linear.bias is None
+    names = {n for n, _ in layer.named_parameters()}
+    assert names == {"linear.weight", "raw_thresholds"}
+
+
+def test_logit_method():
+    layer = OrdinalOutput(input_dim=4, output_dim=3)
+    x = torch.randn(5, 4)
+    torch.testing.assert_close(layer.logit(x), layer.linear(x))
+    assert layer.logit(x).shape == (5, 1)
+
+
+def test_output_dim_too_small_raises():
+    with pytest.raises(ValueError, match="at least 2"):
+        OrdinalOutput(input_dim=4, output_dim=1)
 
 
 def test_extra_leading_dims():

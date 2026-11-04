@@ -2,6 +2,8 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 
+from deepordinal._common import check_output_dim, initial_raw_thresholds
+
 __all__ = ["OrdinalOutput", "ordinal_loss", "ordistic_loss"]
 
 
@@ -90,30 +92,51 @@ class OrdinalOutput(nnx.Module):
     """Ordinal regression output layer (Flax NNX).
 
     Projects an arbitrary input down to a single logit and converts it
-    into *output_dim* class probabilities via learned, sorted thresholds.
-
-    The layer learns ``output_dim - 1`` interior thresholds ``t(1), ..., t(K-1)``
-    (with ``t(0) = -inf`` and ``t(K) = +inf`` fixed) and computes::
+    into *output_dim* class probabilities via learned, ordered thresholds
+    ``t(1) < ... < t(K-1)``::
 
         P(y = k | x) = sigmoid(t(k+1) - logit) - sigmoid(t(k) - logit)
 
+    where ``sigmoid(t(0) - logit)`` is 0 and ``sigmoid(t(K) - logit)`` is 1.
+
+    The thresholds are ordered by construction. The layer stores
+    ``raw_thresholds``: the first threshold, then the inverse softplus of each
+    gap. ``interior_thresholds`` recovers them as
+    ``cumsum([raw[0], softplus(raw[1:])])``, so no optimizer step can reorder
+    them and the probabilities are never negative.
+
+    The projection has no bias. Adding a constant to the logit and to every
+    threshold gives the same model, so the thresholds absorb the bias.
+
+    Thresholds initialize at ``logit(k/K)``, so a zero logit gives every class
+    probability ``1/K``.
+
     Args:
         input_dim: Size of the input feature dimension.
-        output_dim: Number of ordinal classes.
-        rngs: ``nnx.Rngs`` used to initialize the parameters.
+        output_dim: Number of ordinal classes, at least 2.
+        rngs: ``nnx.Rngs`` used to initialize the projection.
     """
 
     def __init__(self, input_dim, output_dim, *, rngs: nnx.Rngs):
+        check_output_dim(output_dim)
         self.input_dim = input_dim
         self.output_dim = output_dim
-        self.linear = nnx.Linear(input_dim, 1, rngs=rngs)
-        init = jax.nn.initializers.glorot_uniform()
-        t = init(rngs.params(), (1, output_dim - 1)).reshape(-1)
-        self.interior_thresholds = nnx.Param(jnp.sort(t))
+        self.linear = nnx.Linear(input_dim, 1, use_bias=False, rngs=rngs)
+        self.raw_thresholds = nnx.Param(jnp.asarray(initial_raw_thresholds(output_dim)))
+
+    @property
+    def interior_thresholds(self):
+        """Ordered thresholds, shape ``(K-1,)``. Differentiable."""
+        raw = self.raw_thresholds[...]
+        return jnp.cumsum(jnp.concatenate([raw[:1], jax.nn.softplus(raw[1:])]))
+
+    def logit(self, x):
+        """Raw logit ``z(x)``, shape ``(..., 1)``. Pass this to the loss functions."""
+        return self.linear(x)
 
     def __call__(self, x):
-        logit = self.linear(x)  # (batch, 1)
-        t = self.interior_thresholds[...].astype(logit.dtype)
-        cdf = jax.nn.sigmoid(t - logit)  # P(y <= k), (batch, K-1)
+        logit = self.logit(x)  # (..., 1)
+        t = self.interior_thresholds.astype(logit.dtype)
+        cdf = jax.nn.sigmoid(t - logit)  # P(y <= k), (..., K-1)
         ones = jnp.ones_like(logit)
         return jnp.concatenate([cdf, ones], axis=-1) - jnp.concatenate([1 - ones, cdf], axis=-1)
