@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/).
 
-## [0.3.0] - Unreleased
+## [0.3.0] - 2026-11-04
 
 ### Added
 - **A JAX backend**, `deepordinal.jax`, with the same API as the PyTorch backend. `OrdinalOutput` is a Flax NNX module. The losses use only `jax.numpy`, so any JAX framework can call them. Install with `pip install "deepordinal[jax]"` on Python 3.11 or later.
