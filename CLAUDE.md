@@ -10,7 +10,7 @@ DeepOrdinal is a Python library for deep ordinal regression with PyTorch, Tensor
 deepordinal/
   __init__.py          # version, __all__
   torch.py             # PyTorch: OrdinalOutput(nn.Module), ordinal_loss, ordistic_loss, cumulative_link_loss
-  tf.py                # TF/Keras: OrdinalOutput(Layer), SortedInitializer, ordinal_loss, ordistic_loss, cumulative_link_loss
+  tf.py                # TF/Keras: OrdinalOutput(Layer), ordinal_loss, ordistic_loss, cumulative_link_loss
   jax.py               # JAX/Flax NNX: OrdinalOutput(nnx.Module), ordinal_loss, ordistic_loss, cumulative_link_loss
   _common.py           # backend-free numpy helpers (threshold init, argument checks)
 tests/
@@ -38,7 +38,6 @@ pyproject.toml         # build config, version, extras [torch], [tf], and [jax]
 - Every backend: `layer.logit(h)` returns the raw logit `(..., 1)` and `layer.interior_thresholds` returns the ordered `(K-1,)` thresholds. Pass both to the losses
 - Thresholds are ordered by construction: the trainable parameter is `raw_thresholds` (first threshold, then inverse softplus of each gap) and `interior_thresholds` is a computed property `cumsum([raw[0], softplus(raw[1:])])`
 - The projection to the logit has no bias, because the thresholds absorb it. Thresholds initialize at `logit(k/K)` via `deepordinal/_common.py`, shared by all backends
-- TF module additionally exports `SortedInitializer` (wraps a Keras initializer, sorts output). `OrdinalOutput` no longer uses it; it stays exported for compatibility
 
 ## Build & Test
 
