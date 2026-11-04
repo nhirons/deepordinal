@@ -6,20 +6,16 @@ __all__ = ["OrdinalOutput", "ordinal_loss", "ordistic_loss"]
 
 
 def _penalty(z, name):
-    # Every penalty is zero for z >= 1, so clipping z at 1 inside the quadratic
-    # branches leaves values unchanged while keeping gradients finite when
-    # z = +inf (the immediate construction's boundary thresholds).
-    zc = jnp.minimum(z, 1.0)
     if name == "hinge":
         return jnp.maximum(0.0, 1.0 - z)
     elif name == "smooth_hinge":
         return jnp.where(
             z >= 1,
             jnp.zeros_like(z),
-            jnp.where(z > 0, (1 - zc) ** 2 / 2, 0.5 - z),
+            jnp.where(z > 0, (1 - z) ** 2 / 2, 0.5 - z),
         )
     elif name == "modified_least_squares":
-        return jnp.where(z >= 1, jnp.zeros_like(z), (1 - zc) ** 2)
+        return jnp.where(z >= 1, jnp.zeros_like(z), (1 - z) ** 2)
     elif name == "logistic":
         return jax.nn.softplus(-z)
     else:
@@ -40,30 +36,24 @@ def ordinal_loss(logits, targets, thresholds, construction="all", penalty="logis
     Returns:
         Scalar mean loss over the batch.
     """
+    if construction not in ("all", "immediate"):
+        raise ValueError(f"Unknown construction: {construction}")
     logits = jnp.reshape(jnp.asarray(logits), (-1,))
-    targets = jnp.asarray(targets).astype(jnp.int32)
+    targets = jnp.asarray(targets).astype(jnp.int32)[:, None]  # (batch, 1)
     thresholds = jnp.asarray(thresholds, dtype=logits.dtype)
     K = thresholds.shape[0] + 1
-    # Paper uses 1-indexed labels; convert 0-indexed targets
-    y = targets + 1  # (batch,) in [1, K]
-
-    if construction == "all":
-        # eq 13: sum over l=1..K-1 of f(s(l;y) * (theta_l - z))
-        # s(l;y) = -1 if l < y, +1 if l >= y
-        l_idx = jnp.arange(1, K)  # (K-1,)
-        signs = jnp.where(l_idx[None, :] < y[:, None], -1.0, 1.0)  # (batch, K-1)
-        diff = thresholds[None, :] - logits[:, None]  # (batch, K-1)
-        loss = _penalty(signs * diff, penalty).sum(axis=1)  # (batch,)
-    elif construction == "immediate":
-        # eq 12: f(z - theta_{y-1}) + f(theta_y - z)
-        inf = jnp.full((1,), jnp.inf, dtype=thresholds.dtype)
-        t_low = jnp.concatenate([-inf, thresholds])
-        t_high = jnp.concatenate([thresholds, inf])
-        theta_low = t_low[targets]  # theta_{y-1}
-        theta_high = t_high[targets]  # theta_y
-        loss = _penalty(logits - theta_low, penalty) + _penalty(theta_high - logits, penalty)
-    else:
-        raise ValueError(f"Unknown construction: {construction}")
+    # Threshold l (0-indexed) separates classes <= l from classes > l. The logit
+    # should sit above threshold l when l < y and below it otherwise, so the
+    # margin is s(l; y) * (theta_l - z) with s = -1 if l < y else +1 (eq 13).
+    l_idx = jnp.arange(K - 1)  # (K-1,)
+    signs = 1 - 2 * (l_idx < targets).astype(logits.dtype)  # (batch, K-1)
+    margins = signs * (thresholds[None, :] - logits[:, None])  # (batch, K-1)
+    penalties = _penalty(margins, penalty)
+    if construction == "immediate":
+        # eq 12 keeps only the thresholds bounding the target class: y-1 and y.
+        # The first and last classes have one bounding threshold each.
+        penalties = penalties * ((l_idx == targets - 1) | (l_idx == targets))
+    loss = penalties.sum(axis=1)  # (batch,)
 
     return loss.mean()
 
@@ -123,7 +113,7 @@ class OrdinalOutput(nnx.Module):
 
     def __call__(self, x):
         logit = self.linear(x)  # (batch, 1)
-        t = self.interior_thresholds[...]
-        inf = jnp.full((1,), jnp.inf, dtype=logit.dtype)
-        thresholds = jnp.concatenate([-inf, t.astype(logit.dtype), inf])  # (K+1,)
-        return jax.nn.sigmoid(thresholds[1:] - logit) - jax.nn.sigmoid(thresholds[:-1] - logit)
+        t = self.interior_thresholds[...].astype(logit.dtype)
+        cdf = jax.nn.sigmoid(t - logit)  # P(y <= k), (batch, K-1)
+        ones = jnp.ones_like(logit)
+        return jnp.concatenate([cdf, ones], axis=-1) - jnp.concatenate([1 - ones, cdf], axis=-1)

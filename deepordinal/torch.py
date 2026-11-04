@@ -35,28 +35,23 @@ def ordinal_loss(logits, targets, thresholds, construction="all", penalty="logis
     Returns:
         Scalar mean loss over the batch.
     """
-    logits = logits.reshape(-1)
-    targets = targets.long()
-    K = thresholds.shape[0] + 1
-    # Paper uses 1-indexed labels; convert 0-indexed targets
-    y = targets + 1  # (batch,) in [1, K]
-
-    if construction == "all":
-        # eq 13: sum over l=1..K-1 of f(s(l;y) * (theta_l - z))
-        # s(l;y) = -1 if l < y, +1 if l >= y
-        l_idx = torch.arange(1, K, device=logits.device).float()  # (K-1,)
-        signs = torch.where(l_idx.unsqueeze(0) < y.unsqueeze(1), -1.0, 1.0)  # (batch, K-1)
-        diff = thresholds.unsqueeze(0) - logits.unsqueeze(1)  # (batch, K-1)
-        loss = _penalty(signs * diff, penalty).sum(dim=1)  # (batch,)
-    elif construction == "immediate":
-        # eq 12: f(z - theta_{y-1}) + f(theta_y - z)
-        t_low = torch.cat([torch.tensor([float("-inf")], device=thresholds.device), thresholds])
-        t_high = torch.cat([thresholds, torch.tensor([float("inf")], device=thresholds.device)])
-        theta_low = t_low[targets]   # theta_{y-1} (0-indexed: targets maps to y-1)
-        theta_high = t_high[targets]  # theta_y
-        loss = _penalty(logits - theta_low, penalty) + _penalty(theta_high - logits, penalty)
-    else:
+    if construction not in ("all", "immediate"):
         raise ValueError(f"Unknown construction: {construction}")
+    logits = logits.reshape(-1)
+    targets = targets.long().unsqueeze(1)  # (batch, 1)
+    K = thresholds.shape[0] + 1
+    # Threshold l (0-indexed) separates classes <= l from classes > l. The logit
+    # should sit above threshold l when l < y and below it otherwise, so the
+    # margin is s(l; y) * (theta_l - z) with s = -1 if l < y else +1 (eq 13).
+    l_idx = torch.arange(K - 1, device=logits.device)  # (K-1,)
+    signs = 1 - 2 * (l_idx < targets).to(logits.dtype)  # (batch, K-1)
+    margins = signs * (thresholds.unsqueeze(0) - logits.unsqueeze(1))  # (batch, K-1)
+    penalties = _penalty(margins, penalty)
+    if construction == "immediate":
+        # eq 12 keeps only the thresholds bounding the target class: y-1 and y.
+        # The first and last classes have one bounding threshold each.
+        penalties = penalties * ((l_idx == targets - 1) | (l_idx == targets))
+    loss = penalties.sum(dim=1)  # (batch,)
 
     return loss.mean()
 
@@ -117,7 +112,6 @@ class OrdinalOutput(nn.Module):
 
     def forward(self, x):
         logit = self.linear(x)  # (batch, 1)
-        t_low = torch.full((1,), float("-inf"), device=logit.device, dtype=logit.dtype)
-        t_high = torch.full((1,), float("inf"), device=logit.device, dtype=logit.dtype)
-        thresholds = torch.cat([t_low, self.interior_thresholds, t_high])  # (K+1,)
-        return torch.sigmoid(thresholds[1:] - logit) - torch.sigmoid(thresholds[:-1] - logit)
+        cdf = torch.sigmoid(self.interior_thresholds - logit)  # P(y <= k), (batch, K-1)
+        ones = torch.ones_like(logit)
+        return torch.cat([cdf, ones], dim=-1) - torch.cat([1 - ones, cdf], dim=-1)
