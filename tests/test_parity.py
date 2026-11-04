@@ -63,3 +63,9 @@ def test_ordistic_loss_parity():
     _all_equal({
         name: run(mod.ordistic_loss, LOGITS, TARGETS, MEANS) for name, (run, mod) in BACKENDS.items()
     })
+
+
+def test_cumulative_link_loss_parity():
+    _all_equal({
+        name: run(mod.cumulative_link_loss, LOGITS, TARGETS, THRESHOLDS) for name, (run, mod) in BACKENDS.items()
+    })
