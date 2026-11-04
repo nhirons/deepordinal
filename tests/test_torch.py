@@ -52,6 +52,13 @@ def test_seed_reproducibility():
     torch.testing.assert_close(a(x), b(x))
 
 
+def test_extra_leading_dims():
+    layer = OrdinalOutput(input_dim=4, output_dim=5)
+    out = layer(torch.randn(2, 3, 4))
+    assert out.shape == (2, 3, 5)
+    torch.testing.assert_close(out.sum(dim=-1), torch.ones(2, 3), atol=1e-5, rtol=0)
+
+
 def test_single_sample():
     layer = OrdinalOutput(input_dim=2, output_dim=4)
     x = torch.randn(1, 2)
@@ -187,6 +194,25 @@ class TestOrdinalLoss:
         targets = torch.tensor([1])
         loss = ordinal_loss(logits, targets, thresholds, construction="immediate", penalty="hinge")
         torch.testing.assert_close(loss, torch.tensor(0.0))
+
+    def test_hand_worked_immediate_boundary_classes(self):
+        # K=3, thresholds=[0, 2], logit=0.5. Class 0 has only an upper threshold:
+        # f(0 - 0.5) = 1.5. Class 2 has only a lower threshold: f(0.5 - 2) = 2.5.
+        thresholds = torch.tensor([0.0, 2.0])
+        logits = torch.tensor([0.5, 0.5])
+        targets = torch.tensor([0, 2])
+        loss = ordinal_loss(logits, targets, thresholds, construction="immediate", penalty="hinge")
+        torch.testing.assert_close(loss, torch.tensor(2.0))
+
+    @pytest.mark.parametrize("construction", ["all", "immediate"])
+    @pytest.mark.parametrize("penalty", ["hinge", "smooth_hinge", "modified_least_squares", "logistic"])
+    def test_gradients_finite_at_boundary_classes(self, construction, penalty):
+        thresholds = torch.tensor([-1.0, 0.0, 1.0], requires_grad=True)
+        logits = torch.tensor([0.5, -0.5], requires_grad=True)
+        targets = torch.tensor([0, 3])
+        ordinal_loss(logits, targets, thresholds, construction=construction, penalty=penalty).backward()
+        assert torch.isfinite(logits.grad).all()
+        assert torch.isfinite(thresholds.grad).all()
 
 
 class TestOrdisticLoss:

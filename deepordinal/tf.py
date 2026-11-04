@@ -4,9 +4,6 @@ from tensorflow.keras.layers import Layer
 
 __all__ = ["OrdinalOutput", "SortedInitializer", "ordinal_loss", "ordistic_loss"]
 
-_INF = tf.constant(float("inf"))
-
-
 def _penalty(z, name):
     if name == "hinge":
         return tf.maximum(0.0, 1.0 - z)
@@ -38,28 +35,25 @@ def ordinal_loss(logits, targets, thresholds, construction="all", penalty="logis
     Returns:
         Scalar mean loss over the batch.
     """
+    if construction not in ("all", "immediate"):
+        raise ValueError(f"Unknown construction: {construction}")
     logits = tf.cast(tf.reshape(logits, [-1]), tf.float32)
-    targets = tf.cast(targets, tf.int32)
+    targets = tf.expand_dims(tf.cast(targets, tf.int32), 1)  # (batch, 1)
     thresholds = tf.cast(thresholds, tf.float32)
     K = thresholds.shape[0] + 1
-    y = targets + 1  # 1-indexed
-
-    if construction == "all":
-        l_idx = tf.cast(tf.range(1, K), tf.float32)  # (K-1,)
-        y_f = tf.cast(y, tf.float32)
-        signs = tf.where(
-            tf.expand_dims(l_idx, 0) < tf.expand_dims(y_f, 1), -1.0, 1.0
-        )  # (batch, K-1)
-        diff = tf.expand_dims(thresholds, 0) - tf.expand_dims(logits, 1)  # (batch, K-1)
-        loss = tf.reduce_sum(_penalty(signs * diff, penalty), axis=1)
-    elif construction == "immediate":
-        t_low = tf.concat([[float("-inf")], thresholds], axis=0)
-        t_high = tf.concat([thresholds, [float("inf")]], axis=0)
-        theta_low = tf.gather(t_low, targets)
-        theta_high = tf.gather(t_high, targets)
-        loss = _penalty(logits - theta_low, penalty) + _penalty(theta_high - logits, penalty)
-    else:
-        raise ValueError(f"Unknown construction: {construction}")
+    # Threshold l (0-indexed) separates classes <= l from classes > l. The logit
+    # should sit above threshold l when l < y and below it otherwise, so the
+    # margin is s(l; y) * (theta_l - z) with s = -1 if l < y else +1 (eq 13).
+    l_idx = tf.expand_dims(tf.range(K - 1), 0)  # (1, K-1)
+    signs = 1.0 - 2.0 * tf.cast(l_idx < targets, tf.float32)  # (batch, K-1)
+    margins = signs * (tf.expand_dims(thresholds, 0) - tf.expand_dims(logits, 1))
+    penalties = _penalty(margins, penalty)
+    if construction == "immediate":
+        # eq 12 keeps only the thresholds bounding the target class: y-1 and y.
+        # The first and last classes have one bounding threshold each.
+        mask = tf.logical_or(tf.equal(l_idx, targets - 1), tf.equal(l_idx, targets))
+        penalties = penalties * tf.cast(mask, tf.float32)
+    loss = tf.reduce_sum(penalties, axis=1)
 
     return tf.reduce_mean(loss)
 
@@ -148,11 +142,10 @@ class OrdinalOutput(Layer):
         super().build(input_shape)
 
     def call(self, inputs):
-        logit = tf.matmul(inputs, self.kernel) + self.bias
-        t_low = tf.fill([1, 1], -_INF)
-        t_high = tf.fill([1, 1], _INF)
-        thresholds = tf.concat([t_low, self.interior_thresholds, t_high], axis=-1)
-        return tf.sigmoid(thresholds[:, 1:] - logit) - tf.sigmoid(thresholds[:, :-1] - logit)
+        logit = tf.matmul(inputs, self.kernel) + self.bias  # (batch, 1)
+        cdf = tf.sigmoid(self.interior_thresholds - logit)  # P(y <= k), (batch, K-1)
+        ones = tf.ones_like(logit)
+        return tf.concat([cdf, ones], axis=-1) - tf.concat([1.0 - ones, cdf], axis=-1)
 
     def compute_output_shape(self, input_shape):
         return (input_shape[0], self.output_dim)

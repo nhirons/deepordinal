@@ -53,6 +53,13 @@ def test_seed_reproducibility():
     np.testing.assert_allclose(a(x), b(x))
 
 
+def test_extra_leading_dims():
+    layer = OrdinalOutput(input_dim=4, output_dim=5, rngs=nnx.Rngs(0))
+    out = layer(_x((2, 3, 4)))
+    assert out.shape == (2, 3, 5)
+    np.testing.assert_allclose(out.sum(axis=-1), np.ones((2, 3)), atol=1e-5)
+
+
 def test_single_sample():
     layer = OrdinalOutput(input_dim=2, output_dim=4, rngs=nnx.Rngs(0))
     out = layer(_x((1, 2)))
@@ -135,14 +142,14 @@ class TestOrdinalLoss:
         assert jnp.any(g_logits != 0)
         assert jnp.any(g_thresh != 0)
 
+    @pytest.mark.parametrize("construction", ["all", "immediate"])
     @pytest.mark.parametrize("penalty", ["hinge", "smooth_hinge", "modified_least_squares", "logistic"])
-    def test_immediate_gradients_finite_at_boundary_classes(self, penalty):
-        # Classes 0 and K-1 hit the fixed +/-inf thresholds.
+    def test_gradients_finite_at_boundary_classes(self, construction, penalty):
         thresholds = jnp.array([-1.0, 0.0, 1.0])
         logits = jnp.array([0.5, -0.5])
         targets = jnp.array([0, 3])
         g_logits, g_thresh = jax.grad(
-            lambda l, t: ordinal_loss(l, targets, t, construction="immediate", penalty=penalty),
+            lambda l, t: ordinal_loss(l, targets, t, construction=construction, penalty=penalty),
             argnums=(0, 1),
         )(logits, thresholds)
         assert bool(jnp.isfinite(g_logits).all())
@@ -189,6 +196,15 @@ class TestOrdinalLoss:
 
         grads = nnx.grad(loss_fn)(layer)
         assert bool(jnp.isfinite(grads.interior_thresholds[...]).all())
+
+    def test_hand_worked_immediate_boundary_classes(self):
+        # K=3, thresholds=[0, 2], logit=0.5. Class 0 has only an upper threshold:
+        # f(0 - 0.5) = 1.5. Class 2 has only a lower threshold: f(0.5 - 2) = 2.5.
+        loss = ordinal_loss(
+            jnp.array([0.5, 0.5]), jnp.array([0, 2]), jnp.array([0.0, 2.0]),
+            construction="immediate", penalty="hinge",
+        )
+        np.testing.assert_allclose(loss, 2.0)
 
 
 class TestOrdisticLoss:

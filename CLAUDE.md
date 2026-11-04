@@ -26,12 +26,12 @@ pyproject.toml         # build config, version, extras [torch], [tf], and [jax]
 
 - All backends expose the same public API: `OrdinalOutput`, `ordinal_loss`, `ordistic_loss`
 - `OrdinalOutput` projects input to a single logit, then produces K class probabilities from K-1 sorted thresholds
-- Math: `P(y=k|x) = sigmoid(t(k+1) - logit) - sigmoid(t(k) - logit)`, with `t(0) = -inf` and `t(K) = inf` fixed
+- Math: `P(y=k|x) = sigmoid(t(k+1) - logit) - sigmoid(t(k) - logit)`, where `sigmoid(t(0) - logit)` is 0 and `sigmoid(t(K) - logit)` is 1
+- No backend materializes infinite thresholds: the layer pads the K-1 cumulative probabilities with literal 0 and 1, and the `immediate` construction is the `all` construction with a mask over the two thresholds bounding the target class. Infinite thresholds produce NaN gradients for quadratic penalties
 - Loss functions operate on raw logits + thresholds, NOT on probability output from the layer
 - PyTorch `OrdinalOutput(input_dim, output_dim)` — thresholds accessed via `layer.interior_thresholds` (shape `(K-1,)`), logit via `layer.linear(h)`
 - TF/Keras `OrdinalOutput(output_dim)` — thresholds shape is `(1, K-1)`, use `layer.interior_thresholds[0]` for loss; logit via `tf.matmul(h, layer.kernel) + layer.bias`
 - JAX/Flax NNX `OrdinalOutput(input_dim, output_dim, *, rngs)`: thresholds via `layer.interior_thresholds[...]` (shape `(K-1,)`), logit via `layer.linear(h)`
-- JAX `_penalty` clips z at 1 inside quadratic branches so `immediate` construction gradients stay finite at the +/-inf boundary thresholds
 - TF module additionally exports `SortedInitializer` (wraps a Keras initializer, sorts output)
 
 ## Build & Test

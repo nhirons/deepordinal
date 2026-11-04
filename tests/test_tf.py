@@ -59,6 +59,13 @@ def test_get_config_roundtrip():
     assert restored.output_dim == 4
 
 
+def test_extra_leading_dims():
+    layer = OrdinalOutput(output_dim=5)
+    out = layer(tf.random.normal((2, 3, 4)))
+    assert out.shape == (2, 3, 5)
+    tf.debugging.assert_near(tf.reduce_sum(out, axis=-1), tf.ones((2, 3)), atol=1e-5)
+
+
 def test_single_sample():
     layer = OrdinalOutput(output_dim=4)
     x = tf.random.normal((1, 2))
@@ -184,6 +191,26 @@ class TestOrdinalLoss:
         targets = tf.constant([1])
         loss = ordinal_loss(logits, targets, thresholds, construction="immediate", penalty="hinge")
         np.testing.assert_allclose(loss.numpy(), 0.0, atol=1e-6)
+
+    def test_hand_worked_immediate_boundary_classes(self):
+        # K=3, thresholds=[0, 2], logit=0.5. Class 0 has only an upper threshold:
+        # f(0 - 0.5) = 1.5. Class 2 has only a lower threshold: f(0.5 - 2) = 2.5.
+        thresholds = tf.constant([0.0, 2.0])
+        logits = tf.constant([0.5, 0.5])
+        targets = tf.constant([0, 2])
+        loss = ordinal_loss(logits, targets, thresholds, construction="immediate", penalty="hinge")
+        np.testing.assert_allclose(loss.numpy(), 2.0, atol=1e-6)
+
+    @pytest.mark.parametrize("construction", ["all", "immediate"])
+    @pytest.mark.parametrize("penalty", ["hinge", "smooth_hinge", "modified_least_squares", "logistic"])
+    def test_gradients_finite_at_boundary_classes(self, construction, penalty):
+        thresholds = tf.Variable([-1.0, 0.0, 1.0])
+        logits = tf.Variable([0.5, -0.5])
+        targets = tf.constant([0, 3])
+        with tf.GradientTape() as tape:
+            loss = ordinal_loss(logits, targets, thresholds, construction=construction, penalty=penalty)
+        for g in tape.gradient(loss, [logits, thresholds]):
+            assert np.isfinite(g.numpy()).all()
 
 
 class TestOrdisticLoss:
