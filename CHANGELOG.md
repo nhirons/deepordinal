@@ -16,12 +16,15 @@ All notable changes to this project are documented in this file. The format foll
 - **Thresholds initialize at `logit(k/K)`** instead of sorted Glorot-uniform draws, so a zero logit gives every class probability `1/K`.
 - **TF `interior_thresholds` has shape `(K-1,)`**, matching the other backends.
 - **`OrdinalOutput` raises `ValueError` for `output_dim < 2`.**
+- **TF losses compute in the dtype of the logits** instead of casting everything to float32, matching the other backends.
+- **The `[tf]` extra requires `tensorflow>=2.15`**, the oldest version the test suite covers. The previous `>=2.0` floor was never tested.
 - **The forward pass returns `exp(log_probs(x))`** instead of a difference of sigmoids. In float32, the difference rounded every class but one to exactly 0 once `|logit|` passed about 17. The two agree to float precision elsewhere.
 
 ### Removed
 - **`deepordinal.tf.SortedInitializer`.** It existed to initialize sorted thresholds, and the layer no longer has a sorted-threshold variable to initialize. It cannot initialize `raw_thresholds` either, because that vector stores a first threshold and inverse-softplus gaps, not sorted values. Sorting an initializer's output never kept parameters ordered during training anyway. The class was TF-only and undocumented. It never appeared in a saved layer config, so removing it breaks no saved model. If you used it elsewhere, sort the output of any Keras initializer with `tf.sort(init(shape), axis=-1)`.
 
 ### Fixed
+- **`from deepordinal import *`** no longer imports every backend, which failed unless all three were installed.
 - **NaN gradients in `ordinal_loss(..., construction="immediate")`** for targets in the first or last class. PyTorch failed with `smooth_hinge` and `modified_least_squares`, and TensorFlow failed with all four penalties. No backend builds infinite thresholds any more.
 
 ### Migrating from 0.2

@@ -1,3 +1,5 @@
+"""Backend-free helpers shared by every backend."""
+
 import numpy as np
 
 
@@ -7,14 +9,11 @@ def check_output_dim(output_dim):
 
 
 def initial_raw_thresholds(output_dim):
-    """Raw threshold parameters whose ordered thresholds are logit(k/K).
+    """Raw parameters whose thresholds are ``logit(k/K)``: uniform probabilities at a zero logit.
 
-    With these thresholds a zero logit assigns every class probability 1/K.
-    The raw vector stores the first threshold followed by the inverse softplus
-    of each gap, matching ``t = cumsum([raw[0], softplus(raw[1:])])``.
+    The layout is the first threshold, then the inverse softplus of each gap.
     """
-    k = np.arange(1, output_dim, dtype=np.float64)
+    k = np.arange(1, output_dim)
     thresholds = np.log(k / (output_dim - k))
     gaps = np.diff(thresholds)
-    inv_softplus = gaps + np.log(-np.expm1(-gaps))
-    return np.concatenate([thresholds[:1], inv_softplus]).astype(np.float32)
+    return np.concatenate([thresholds[:1], gaps + np.log(-np.expm1(-gaps))]).astype(np.float32)
