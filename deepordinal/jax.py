@@ -1,10 +1,12 @@
+import math
+
 import jax
 import jax.numpy as jnp
 from flax import nnx
 
 from deepordinal._common import check_output_dim, initial_raw_thresholds
 
-__all__ = ["OrdinalOutput", "ordinal_loss", "ordistic_loss"]
+__all__ = ["OrdinalOutput", "cumulative_link_loss", "ordinal_loss", "ordistic_loss"]
 
 
 def _penalty(z, name):
@@ -88,6 +90,60 @@ def ordistic_loss(logits, targets, means, log_priors=None):
     return (log_partition - target_energy).mean()
 
 
+_LOG2 = math.log(2.0)
+
+
+def _log1mexp(a):
+    # log(1 - exp(-a)) for a > 0 (Maechler 2012)
+    return jnp.where(a < _LOG2, jnp.log(-jnp.expm1(-a)), jnp.log1p(-jnp.exp(-a)))
+
+
+def _log_probs(logit, thresholds):
+    """log P(y = k | z) for the cumulative logit model, shape ``(..., K)``.
+
+    ``logit`` has shape ``(..., 1)``. With ``a(k) = t(k) - z``::
+
+        log P(0)     = log sigmoid(a(1))
+        log P(K-1)   = log sigmoid(-a(K-1))
+        log P(k)     = log sigmoid(a(k+1)) + log sigmoid(-a(k)) + log(1 - exp(a(k) - a(k+1)))
+
+    The middle identity is exact, and every term is a softplus or a
+    ``log1mexp``, so nothing cancels.
+    """
+    a = thresholds - logit  # (..., K-1)
+    first = -jax.nn.softplus(-a[..., :1])
+    last = -jax.nn.softplus(a[..., -1:])
+    hi, lo = a[..., 1:], a[..., :-1]
+    mid = -jax.nn.softplus(-hi) - jax.nn.softplus(lo) + _log1mexp(hi - lo)
+    return jnp.concatenate([first, mid, last], axis=-1)
+
+
+def cumulative_link_loss(logits, targets, thresholds):
+    """Negative log-likelihood of the cumulative logit model.
+
+    This is the likelihood of the model ``OrdinalOutput`` represents, also
+    called the proportional-odds or ordered logit model::
+
+        P(y = k | z) = sigmoid(t(k+1) - z) - sigmoid(t(k) - z)
+
+    The log-probabilities are computed without subtracting probabilities,
+    so they stay accurate when every ``sigmoid(t(k) - z)`` rounds to 0 or 1.
+
+    Args:
+        logits: (batch,) or (batch, 1): raw predictor output z(x).
+        targets: (batch,): integer labels in [0, K).
+        thresholds: (K-1,): strictly increasing interior thresholds.
+
+    Returns:
+        Scalar mean negative log-likelihood over the batch.
+    """
+    logits = jnp.reshape(jnp.asarray(logits), (-1, 1))
+    targets = jnp.asarray(targets).astype(jnp.int32).reshape(-1, 1)
+    thresholds = jnp.asarray(thresholds, dtype=logits.dtype)
+    log_p = _log_probs(logits, thresholds)  # (batch, K)
+    return -jnp.take_along_axis(log_p, targets, axis=1).mean()
+
+
 class OrdinalOutput(nnx.Module):
     """Ordinal regression output layer (Flax NNX).
 
@@ -136,9 +192,10 @@ class OrdinalOutput(nnx.Module):
         """Raw logit ``z(x)``, shape ``(..., 1)``. Pass this to the loss functions."""
         return self.linear(x)
 
-    def __call__(self, x):
+    def log_probs(self, x):
+        """Log class probabilities, shape ``(..., K)``. Numerically stable."""
         logit = self.logit(x)  # (..., 1)
-        t = self.interior_thresholds.astype(logit.dtype)
-        cdf = jax.nn.sigmoid(t - logit)  # P(y <= k), (..., K-1)
-        ones = jnp.ones_like(logit)
-        return jnp.concatenate([cdf, ones], axis=-1) - jnp.concatenate([1 - ones, cdf], axis=-1)
+        return _log_probs(logit, self.interior_thresholds.astype(logit.dtype))
+
+    def __call__(self, x):
+        return jnp.exp(self.log_probs(x))

@@ -6,7 +6,7 @@
 
 Ordinal output layers and loss functions for PyTorch, TensorFlow/Keras, and JAX/Flax, based on [Rennie & Srebro (2005)](https://ttic.uchicago.edu/~nati/Publications/RennieSrebroIJCAI05.pdf).
 
-DeepOrdinal provides an `OrdinalOutput` layer that converts a learned logit into ordinal class probabilities via sorted thresholds, plus loss functions designed specifically for ordinal regression.
+DeepOrdinal provides an `OrdinalOutput` layer that converts a learned logit into ordinal class probabilities via ordered thresholds, plus loss functions designed specifically for ordinal regression.
 
 ## Installation
 
@@ -142,6 +142,7 @@ where `sigmoid(t(0) - logit)` is 0 and `sigmoid(t(K) - logit)` is 1.
 | Import | `from deepordinal.torch import OrdinalOutput` | `from deepordinal.tf import OrdinalOutput` | `from deepordinal.jax import OrdinalOutput` |
 | Constructor | `OrdinalOutput(input_dim, output_dim)` | `OrdinalOutput(output_dim)` | `OrdinalOutput(input_dim, output_dim, rngs=rngs)` |
 | Logit | `layer.logit(h)` | `layer.logit(h)` | `layer.logit(h)` |
+| Log-probabilities | `layer.log_probs(h)` | `layer.log_probs(h)` | `layer.log_probs(h)` |
 | Thresholds | `layer.interior_thresholds`, shape `(K-1,)` | `layer.interior_thresholds`, shape `(K-1,)` | `layer.interior_thresholds`, shape `(K-1,)` |
 | Trainable parameters | `linear.weight`, `raw_thresholds` | `kernel`, `raw_thresholds` | `linear.kernel`, `raw_thresholds` |
 
@@ -195,6 +196,31 @@ ordistic_loss(logits, targets, means, log_priors=None)
 - **log_priors** — `(K,)` or `None`, optional log-prior terms
 
 **Returns:** scalar mean negative log-likelihood over the batch.
+
+### `cumulative_link_loss`
+
+Negative log-likelihood of the model `OrdinalOutput` represents (the cumulative logit, proportional-odds, or ordered logit model). Train with this loss when you use the layer's probabilities directly, for example for calibrated predictions or expected-cost decisions.
+
+```python
+cumulative_link_loss(logits, targets, thresholds)
+```
+
+**Parameters:**
+
+- **logits**: `(batch,)` or `(batch, 1)`, raw predictor output
+- **targets**: `(batch,)`, integer labels in `[0, K)`
+- **thresholds**: `(K-1,)`, strictly increasing interior thresholds, such as `layer.interior_thresholds`
+
+**Returns:** scalar mean negative log-likelihood over the batch.
+
+The log-probabilities come from softplus and `log1mexp` terms instead of a difference of sigmoids. A difference of sigmoids rounds to exactly 0 in float32 once `|logit|` passes about 17. `layer.log_probs(h)` exposes the same computation, and the layer's forward pass returns `exp(layer.log_probs(h))`.
+
+For interior classes, the loss equals the immediate-threshold logistic loss plus `-log(1 - exp(-gap))`, where `gap` is the width of the target class's interval. That extra term penalizes narrow intervals. For the first and last classes, the two losses are equal.
+
+#### Choosing a loss
+
+- `ordinal_loss` (all-threshold, logistic) is the paper's best performer for minimizing absolute error between predicted and true labels.
+- `cumulative_link_loss` fits the probabilities the layer outputs. Choose it when the probabilities themselves matter.
 
 ## Examples
 

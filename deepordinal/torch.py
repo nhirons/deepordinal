@@ -1,10 +1,12 @@
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from deepordinal._common import check_output_dim, initial_raw_thresholds
 
-__all__ = ["OrdinalOutput", "ordinal_loss", "ordistic_loss"]
+__all__ = ["OrdinalOutput", "cumulative_link_loss", "ordinal_loss", "ordistic_loss"]
 
 
 def _penalty(z, name):
@@ -84,6 +86,57 @@ def ordistic_loss(logits, targets, means, log_priors=None):
     return (log_partition - target_energy).mean()
 
 
+_LOG2 = math.log(2.0)
+
+
+def _log1mexp(a):
+    # log(1 - exp(-a)) for a > 0 (Maechler 2012)
+    return torch.where(a < _LOG2, torch.log(-torch.expm1(-a)), torch.log1p(-torch.exp(-a)))
+
+
+def _log_probs(logit, thresholds):
+    """log P(y = k | z) for the cumulative logit model, shape ``(..., K)``.
+
+    ``logit`` has shape ``(..., 1)``. With ``a(k) = t(k) - z``::
+
+        log P(0)     = log sigmoid(a(1))
+        log P(K-1)   = log sigmoid(-a(K-1))
+        log P(k)     = log sigmoid(a(k+1)) + log sigmoid(-a(k)) + log(1 - exp(a(k) - a(k+1)))
+
+    The middle identity is exact, and every term is a softplus or a
+    ``log1mexp``, so nothing cancels.
+    """
+    a = thresholds - logit  # (..., K-1)
+    first = -F.softplus(-a[..., :1])
+    last = -F.softplus(a[..., -1:])
+    hi, lo = a[..., 1:], a[..., :-1]
+    mid = -F.softplus(-hi) - F.softplus(lo) + _log1mexp(hi - lo)
+    return torch.cat([first, mid, last], dim=-1)
+
+
+def cumulative_link_loss(logits, targets, thresholds):
+    """Negative log-likelihood of the cumulative logit model.
+
+    This is the likelihood of the model ``OrdinalOutput`` represents, also
+    called the proportional-odds or ordered logit model::
+
+        P(y = k | z) = sigmoid(t(k+1) - z) - sigmoid(t(k) - z)
+
+    The log-probabilities are computed without subtracting probabilities,
+    so they stay accurate when every ``sigmoid(t(k) - z)`` rounds to 0 or 1.
+
+    Args:
+        logits: (batch,) or (batch, 1): raw predictor output z(x).
+        targets: (batch,): integer labels in [0, K).
+        thresholds: (K-1,): strictly increasing interior thresholds.
+
+    Returns:
+        Scalar mean negative log-likelihood over the batch.
+    """
+    log_p = _log_probs(logits.reshape(-1, 1), thresholds)  # (batch, K)
+    return -log_p.gather(1, targets.long().reshape(-1, 1)).mean()
+
+
 class OrdinalOutput(nn.Module):
     """Ordinal regression output layer.
 
@@ -132,8 +185,9 @@ class OrdinalOutput(nn.Module):
         """Raw logit ``z(x)``, shape ``(..., 1)``. Pass this to the loss functions."""
         return self.linear(x)
 
+    def log_probs(self, x):
+        """Log class probabilities, shape ``(..., K)``. Numerically stable."""
+        return _log_probs(self.logit(x), self.interior_thresholds)
+
     def forward(self, x):
-        logit = self.logit(x)  # (..., 1)
-        cdf = torch.sigmoid(self.interior_thresholds - logit)  # P(y <= k), (..., K-1)
-        ones = torch.ones_like(logit)
-        return torch.cat([cdf, ones], dim=-1) - torch.cat([1 - ones, cdf], dim=-1)
+        return self.log_probs(x).exp()

@@ -2,7 +2,17 @@ import pytest
 
 tf = pytest.importorskip("tensorflow")
 
-from deepordinal.tf import OrdinalOutput, SortedInitializer, ordinal_loss, ordistic_loss
+from deepordinal.tf import OrdinalOutput, SortedInitializer, _log_probs, cumulative_link_loss, ordinal_loss, ordistic_loss
+
+import _reference as ref
+
+
+def _t(a):
+    return tf.constant(a)
+
+
+def _np(x):
+    return x.numpy()
 
 
 def test_output_shape():
@@ -304,3 +314,60 @@ class TestOrdisticLoss:
         targets = tf.random.uniform([20], 0, 3, dtype=tf.int32)
         loss = ordistic_loss(logits, targets, means)
         assert loss.numpy() >= 0
+
+
+class TestCumulativeLinkLoss:
+    T = np.array([-1.0, 0.0, 1.5], np.float32)
+
+    def test_log_probs_match_reference(self):
+        z = np.linspace(-8, 8, 41).astype(np.float32)
+        np.testing.assert_allclose(_np(_log_probs(_t(z[:, None]), _t(self.T))), ref.log_probs(z, self.T), rtol=1e-4, atol=1e-5)
+
+    @pytest.mark.parametrize("z", [-80.0, -30.0, 30.0, 80.0])
+    def test_log_probs_accurate_at_extreme_logits(self, z):
+        # In float32 every sigmoid(t - z) rounds to 0 or 1 here, so subtracting
+        # probabilities gives log(0) for every class except one.
+        got = _np(_log_probs(_t(np.array([[z]], np.float32)), _t(self.T)))
+        assert np.isfinite(got).all()
+        np.testing.assert_allclose(got, ref.log_probs([z], self.T), rtol=1e-5, atol=1e-6)
+
+    def test_hand_worked_two_classes(self):
+        # K=2, t=[0], z=0: P(0) = P(1) = 1/2.
+        loss = cumulative_link_loss(_t(np.array([0.0, 0.0], np.float32)), _t(np.array([0, 1])), _t(np.array([0.0], np.float32)))
+        np.testing.assert_allclose(_np(loss), np.log(2.0), rtol=1e-6)
+
+    def test_loss_is_mean_target_nll(self):
+        rng = np.random.default_rng(0)
+        z = (rng.normal(size=32) * 4).astype(np.float32)
+        y = rng.integers(0, 4, size=32)
+        expected = -ref.log_probs(z, self.T)[np.arange(32), y].mean()
+        np.testing.assert_allclose(_np(cumulative_link_loss(_t(z), _t(y), _t(self.T))), expected, rtol=1e-5)
+
+    def test_differs_from_immediate_logistic_by_gap_term(self):
+        # sigmoid(a) - sigmoid(b) = sigmoid(a) sigmoid(-b) (1 - exp(b - a)), so the NLL
+        # exceeds the immediate-threshold logistic loss by -log(1 - exp(-gap)) for
+        # interior classes and matches it for the first and last classes.
+        rng = np.random.default_rng(1)
+        z = rng.normal(size=16).astype(np.float32)
+        for y in range(4):
+            yy = np.full(16, y)
+            nll = _np(cumulative_link_loss(_t(z), _t(yy), _t(self.T)))
+            imm = _np(ordinal_loss(_t(z), _t(yy), _t(self.T), construction="immediate", penalty="logistic"))
+            gap = -np.log(-np.expm1(-np.diff(self.T.astype(np.float64))[y - 1])) if 0 < y < 3 else 0.0
+            np.testing.assert_allclose(nll - imm, gap, rtol=1e-4, atol=1e-5)
+
+    def test_gradients_finite_at_extreme_logits(self):
+        z = tf.Variable([-80.0, -30.0, 0.0, 30.0, 80.0])
+        t = tf.Variable(self.T)
+        with tf.GradientTape() as tape:
+            loss = cumulative_link_loss(z, tf.constant([1, 2, 0, 1, 2]), t)
+        for g in tape.gradient(loss, [z, t]):
+            assert np.isfinite(g.numpy()).all()
+
+    def test_layer_log_probs_and_forward(self):
+        layer = OrdinalOutput(output_dim=5)
+        x = tf.random.normal((2, 3, 4)) * 20
+        lp = layer.log_probs(x)
+        assert lp.shape == (2, 3, 5)
+        np.testing.assert_allclose(layer(x).numpy(), np.exp(lp.numpy()), rtol=1e-6)
+        np.testing.assert_allclose(np.exp(lp.numpy()).sum(-1), np.ones((2, 3)), atol=1e-5)

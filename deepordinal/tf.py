@@ -1,10 +1,12 @@
+import math
+
 import tensorflow as tf
 from tensorflow.keras import initializers
 from tensorflow.keras.layers import Layer
 
 from deepordinal._common import check_output_dim, initial_raw_thresholds
 
-__all__ = ["OrdinalOutput", "SortedInitializer", "ordinal_loss", "ordistic_loss"]
+__all__ = ["OrdinalOutput", "SortedInitializer", "cumulative_link_loss", "ordinal_loss", "ordistic_loss"]
 
 def _penalty(z, name):
     if name == "hinge":
@@ -92,6 +94,60 @@ def ordistic_loss(logits, targets, means, log_priors=None):
     return tf.reduce_mean(log_partition - target_energy)
 
 
+_LOG2 = math.log(2.0)
+
+
+def _log1mexp(a):
+    # log(1 - exp(-a)) for a > 0 (Maechler 2012)
+    return tf.where(a < _LOG2, tf.math.log(-tf.math.expm1(-a)), tf.math.log1p(-tf.exp(-a)))
+
+
+def _log_probs(logit, thresholds):
+    """log P(y = k | z) for the cumulative logit model, shape ``(..., K)``.
+
+    ``logit`` has shape ``(..., 1)``. With ``a(k) = t(k) - z``::
+
+        log P(0)     = log sigmoid(a(1))
+        log P(K-1)   = log sigmoid(-a(K-1))
+        log P(k)     = log sigmoid(a(k+1)) + log sigmoid(-a(k)) + log(1 - exp(a(k) - a(k+1)))
+
+    The middle identity is exact, and every term is a softplus or a
+    ``log1mexp``, so nothing cancels.
+    """
+    a = thresholds - logit  # (..., K-1)
+    first = -tf.math.softplus(-a[..., :1])
+    last = -tf.math.softplus(a[..., -1:])
+    hi, lo = a[..., 1:], a[..., :-1]
+    mid = -tf.math.softplus(-hi) - tf.math.softplus(lo) + _log1mexp(hi - lo)
+    return tf.concat([first, mid, last], axis=-1)
+
+
+def cumulative_link_loss(logits, targets, thresholds):
+    """Negative log-likelihood of the cumulative logit model.
+
+    This is the likelihood of the model ``OrdinalOutput`` represents, also
+    called the proportional-odds or ordered logit model::
+
+        P(y = k | z) = sigmoid(t(k+1) - z) - sigmoid(t(k) - z)
+
+    The log-probabilities are computed without subtracting probabilities,
+    so they stay accurate when every ``sigmoid(t(k) - z)`` rounds to 0 or 1.
+
+    Args:
+        logits: (batch,) or (batch, 1): raw predictor output z(x).
+        targets: (batch,): integer labels in [0, K).
+        thresholds: (K-1,): strictly increasing interior thresholds.
+
+    Returns:
+        Scalar mean negative log-likelihood over the batch.
+    """
+    logits = tf.cast(tf.reshape(logits, [-1, 1]), tf.float32)
+    targets = tf.cast(tf.reshape(targets, [-1]), tf.int32)
+    thresholds = tf.cast(thresholds, tf.float32)
+    log_p = _log_probs(logits, thresholds)  # (batch, K)
+    return -tf.reduce_mean(tf.gather(log_p, targets, axis=1, batch_dims=1))
+
+
 class SortedInitializer(initializers.Initializer):
     """Wraps a Keras initializer and returns its output sorted along the last axis."""
 
@@ -173,11 +229,12 @@ class OrdinalOutput(Layer):
             self.build(inputs.shape)
         return tf.matmul(tf.cast(inputs, self.compute_dtype), self.kernel)
 
+    def log_probs(self, inputs):
+        """Log class probabilities, shape ``(..., K)``. Numerically stable."""
+        return _log_probs(self.logit(inputs), self.interior_thresholds)
+
     def call(self, inputs):
-        logit = self.logit(inputs)  # (..., 1)
-        cdf = tf.sigmoid(self.interior_thresholds - logit)  # P(y <= k), (..., K-1)
-        ones = tf.ones_like(logit)
-        return tf.concat([cdf, ones], axis=-1) - tf.concat([1.0 - ones, cdf], axis=-1)
+        return tf.exp(self.log_probs(inputs))
 
     def compute_output_shape(self, input_shape):
         return (*input_shape[:-1], self.output_dim)
