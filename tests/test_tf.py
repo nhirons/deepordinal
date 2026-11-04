@@ -59,6 +59,65 @@ def test_get_config_roundtrip():
     assert restored.output_dim == 4
 
 
+def test_thresholds_stay_ordered_for_any_raw_values():
+    layer = OrdinalOutput(output_dim=8)
+    layer(tf.zeros((1, 4)))
+    layer.raw_thresholds.assign(tf.random.normal((7,)) * 10)
+    t = layer.interior_thresholds.numpy()
+    assert (t[1:] >= t[:-1]).all()
+    assert tf.reduce_all(layer(tf.random.normal((64, 4)) * 10) >= 0).numpy()
+
+
+def test_initial_thresholds_give_uniform_probabilities_at_zero_logit():
+    layer = OrdinalOutput(output_dim=5)
+    out = layer(tf.zeros((3, 4)))
+    np.testing.assert_allclose(out.numpy(), np.full((3, 5), 0.2), atol=1e-6)
+
+
+def test_no_bias():
+    layer = OrdinalOutput(output_dim=3)
+    layer(tf.zeros((1, 4)))
+    names = sorted(w.name.split("/")[-1].split(":")[0] for w in layer.trainable_weights)
+    assert names == ["kernel", "raw_thresholds"]
+
+
+def test_logit_method():
+    layer = OrdinalOutput(output_dim=3)
+    x = tf.random.normal((5, 4))
+    layer(x)
+    np.testing.assert_allclose(layer.logit(x).numpy(), tf.matmul(x, layer.kernel).numpy())
+
+
+def test_thresholds_gradient():
+    layer = OrdinalOutput(output_dim=4)
+    x = tf.random.normal((8, 3))
+    layer(x)
+    with tf.GradientTape() as tape:
+        loss = ordinal_loss(layer.logit(x), tf.constant([0, 1, 2, 3] * 2), layer.interior_thresholds)
+    grads = tape.gradient(loss, layer.trainable_weights)
+    assert all(g is not None and np.isfinite(g.numpy()).all() for g in grads)
+
+
+def test_logit_builds_unbuilt_layer():
+    layer = OrdinalOutput(output_dim=3)
+    assert layer.logit(tf.zeros((2, 4))).shape == (2, 1)
+    assert layer.built
+
+
+def test_logit_casts_inputs_like_call():
+    layer = OrdinalOutput(output_dim=4)
+    h = tf.random.normal((2, 3), dtype=tf.float64)
+    assert layer(h).dtype == tf.float32
+    logit = layer.logit(h)
+    assert logit.dtype == tf.float32
+    np.testing.assert_allclose(logit.numpy(), tf.matmul(tf.cast(h, tf.float32), layer.kernel).numpy())
+
+
+def test_output_dim_too_small_raises():
+    with pytest.raises(ValueError, match="at least 2"):
+        OrdinalOutput(output_dim=1)
+
+
 def test_extra_leading_dims():
     layer = OrdinalOutput(output_dim=5)
     out = layer(tf.random.normal((2, 3, 4)))

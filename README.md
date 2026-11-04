@@ -47,7 +47,7 @@ optimizer = torch.optim.Adam(model.parameters())
 
 # Training step
 h = model[1](model[0](x_batch))              # hidden features
-logits = ordinal_layer.linear(h)              # raw logit
+logits = ordinal_layer.logit(h)               # raw logit
 thresholds = ordinal_layer.interior_thresholds
 loss = ordinal_loss(logits, y_batch, thresholds)
 
@@ -72,8 +72,8 @@ ordinal = OrdinalOutput(output_dim=4)
 # Training step
 with tf.GradientTape() as tape:
     h = dense(x_batch)
-    logits = tf.matmul(h, ordinal.kernel) + ordinal.bias
-    thresholds = ordinal.interior_thresholds[0]  # shape is (1, K-1)
+    logits = ordinal.logit(h)
+    thresholds = ordinal.interior_thresholds
     loss = ordinal_loss(logits, y_batch, thresholds)
 grads = tape.gradient(loss, dense.trainable_variables + ordinal.trainable_variables)
 
@@ -107,8 +107,8 @@ optimizer = nnx.Optimizer(model, optax.adam(1e-3), wrt=nnx.Param)
 @nnx.jit
 def train_step(model, optimizer, x, y):
     def loss_fn(model):
-        logits = model.ordinal.linear(model.features(x))  # raw logit
-        thresholds = model.ordinal.interior_thresholds[...]
+        logits = model.ordinal.logit(model.features(x))  # raw logit
+        thresholds = model.ordinal.interior_thresholds
         return ordinal_loss(logits, y, thresholds)
     loss, grads = nnx.value_and_grad(loss_fn)(model)
     optimizer.update(model, grads)
@@ -125,20 +125,25 @@ preds = probs.argmax(axis=1)
 
 ### `OrdinalOutput` Layer
 
-Projects an input down to a single logit and converts it into K class probabilities using K-1 learned, sorted thresholds:
+Projects an input down to a single logit, with no bias, and converts it into K class probabilities using K-1 learned, ordered thresholds:
 
 ```
 P(y = k | x) = sigmoid(t(k+1) - logit) - sigmoid(t(k) - logit)
 ```
 
-where `t(0) = -inf` and `t(K) = inf` are fixed, and interior thresholds are initialized sorted.
+where `sigmoid(t(0) - logit)` is 0 and `sigmoid(t(K) - logit)` is 1.
+
+- **Ordered by construction.** The layer stores `raw_thresholds`, the first threshold followed by the inverse softplus of each gap. `interior_thresholds` computes `cumsum([raw[0], softplus(raw[1:])])`, so training can never reorder the thresholds or produce negative probabilities.
+- **No bias.** Adding a constant to the logit and to every threshold gives the same model, so the thresholds absorb it.
+- **Uniform start.** Thresholds initialize at `logit(k/K)`, so a zero logit assigns every class probability `1/K`.
 
 | | PyTorch | TensorFlow/Keras | JAX/Flax NNX |
 |---|---|---|---|
 | Import | `from deepordinal.torch import OrdinalOutput` | `from deepordinal.tf import OrdinalOutput` | `from deepordinal.jax import OrdinalOutput` |
 | Constructor | `OrdinalOutput(input_dim, output_dim)` | `OrdinalOutput(output_dim)` | `OrdinalOutput(input_dim, output_dim, rngs=rngs)` |
-| Logit access | `layer.linear(h)` | `tf.matmul(h, layer.kernel) + layer.bias` | `layer.linear(h)` |
-| Thresholds | `layer.interior_thresholds`, shape `(K-1,)` | `layer.interior_thresholds[0]` (variable shape is `(1, K-1)`) | `layer.interior_thresholds[...]`, shape `(K-1,)` |
+| Logit | `layer.logit(h)` | `layer.logit(h)` | `layer.logit(h)` |
+| Thresholds | `layer.interior_thresholds`, shape `(K-1,)` | `layer.interior_thresholds`, shape `(K-1,)` | `layer.interior_thresholds`, shape `(K-1,)` |
+| Trainable parameters | `linear.weight`, `raw_thresholds` | `kernel`, `raw_thresholds` | `linear.kernel`, `raw_thresholds` |
 
 ### `ordinal_loss`
 

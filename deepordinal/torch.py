@@ -1,5 +1,8 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+
+from deepordinal._common import check_output_dim, initial_raw_thresholds
 
 __all__ = ["OrdinalOutput", "ordinal_loss", "ordistic_loss"]
 
@@ -85,33 +88,52 @@ class OrdinalOutput(nn.Module):
     """Ordinal regression output layer.
 
     Projects an arbitrary input down to a single logit and converts it
-    into *output_dim* class probabilities via learned, sorted thresholds.
+    into *output_dim* class probabilities via learned, ordered thresholds
+    ``t(1) <= ... <= t(K-1)``::
 
-    The layer learns ``output_dim - 1`` interior thresholds ``t(1)…t(K-1)``
-    (with ``t(0) = -∞`` and ``t(K) = +∞`` fixed) and computes::
+        P(y = k | x) = sigmoid(t(k+1) - logit) - sigmoid(t(k) - logit)
 
-        P(y = k | x) = σ(t(k+1) - logit) - σ(t(k) - logit)
+    where ``sigmoid(t(0) - logit)`` is 0 and ``sigmoid(t(K) - logit)`` is 1.
+
+    The thresholds are ordered by construction. The layer stores
+    ``raw_thresholds``: the first threshold, then the inverse softplus of each
+    gap. ``interior_thresholds`` recovers them as
+    ``cumsum([raw[0], softplus(raw[1:])])``, so no optimizer step can reorder
+    them and the probabilities are never negative. Gaps are positive in exact
+    arithmetic; a raw gap below about -100 underflows to 0 in float32, which
+    ties two thresholds and gives the class between them probability 0.
+
+    The projection has no bias. Adding a constant to the logit and to every
+    threshold gives the same model, so the thresholds absorb the bias.
+
+    Thresholds initialize at ``logit(k/K)``, so a zero logit gives every class
+    probability ``1/K``.
 
     Args:
         input_dim: Size of the input feature dimension.
-        output_dim: Number of ordinal classes.
+        output_dim: Number of ordinal classes, at least 2.
     """
 
     def __init__(self, input_dim, output_dim):
         super().__init__()
+        check_output_dim(output_dim)
         self.input_dim = input_dim
         self.output_dim = output_dim
-        self.linear = nn.Linear(input_dim, 1)
-        self.interior_thresholds = nn.Parameter(torch.empty(output_dim - 1))
-        self._init_thresholds()
+        self.linear = nn.Linear(input_dim, 1, bias=False)
+        self.raw_thresholds = nn.Parameter(torch.from_numpy(initial_raw_thresholds(output_dim)))
 
-    def _init_thresholds(self):
-        nn.init.xavier_uniform_(self.interior_thresholds.unsqueeze(0))
-        with torch.no_grad():
-            self.interior_thresholds.copy_(self.interior_thresholds.sort().values)
+    @property
+    def interior_thresholds(self):
+        """Ordered thresholds, shape ``(K-1,)``. Differentiable."""
+        raw = self.raw_thresholds
+        return torch.cat([raw[:1], F.softplus(raw[1:])]).cumsum(dim=0)
+
+    def logit(self, x):
+        """Raw logit ``z(x)``, shape ``(..., 1)``. Pass this to the loss functions."""
+        return self.linear(x)
 
     def forward(self, x):
-        logit = self.linear(x)  # (batch, 1)
-        cdf = torch.sigmoid(self.interior_thresholds - logit)  # P(y <= k), (batch, K-1)
+        logit = self.logit(x)  # (..., 1)
+        cdf = torch.sigmoid(self.interior_thresholds - logit)  # P(y <= k), (..., K-1)
         ones = torch.ones_like(logit)
         return torch.cat([cdf, ones], dim=-1) - torch.cat([1 - ones, cdf], dim=-1)
