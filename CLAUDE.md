@@ -22,6 +22,7 @@ tests/
 examples/
   example_torch.ipynb  # PyTorch training loop with ordinal_loss
   example_tf.ipynb     # TF/Keras GradientTape training loop with ordinal_loss
+  example_jax.ipynb    # JAX/Flax NNX nnx.jit training loop with ordinal_loss (uses optax)
 CHANGELOG.md           # Keep a Changelog; breaking changes carry migration notes
 pyproject.toml         # build config, version, extras [torch], [tf], and [jax]
 ```
@@ -54,6 +55,7 @@ pytest -v                       # run all tests
 
 ## Conventions
 
+- Example notebooks are committed without outputs. Execute them to verify, then strip outputs before committing
 - PyTorch is the primary backend — list it first in docs, examples, and code
 - All backends must maintain API parity
 - Version is tracked in both `pyproject.toml` and `deepordinal/__init__.py` — keep them in sync

@@ -228,6 +228,7 @@ Complete training loops with synthetic ordinal data:
 
 - [`examples/example_torch.ipynb`](examples/example_torch.ipynb) — PyTorch
 - [`examples/example_tf.ipynb`](examples/example_tf.ipynb) — TensorFlow/Keras
+- [`examples/example_jax.ipynb`](examples/example_jax.ipynb): JAX/Flax NNX, with a jitted training step (needs `optax`)
 
 ## Testing
 
